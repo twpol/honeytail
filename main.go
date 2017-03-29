@@ -5,7 +5,9 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -280,8 +282,15 @@ honeytail --help
 // verifyWritekey calls out to api to validate the writekey, so we can exit
 // immediately instead of happily sending events that are all rejected.
 func verifyWritekey(apiHost string, writeKey string) {
-	url := fmt.Sprintf("%s/1/team_slug", apiHost)
-	req, err := http.NewRequest("GET", url, nil)
+	url, err := url.Parse(e.APIHost)
+	if err != nil {
+		fmt.Println("Failed to parse the APIHost URL:", e.APIHost)
+		fmt.Println("\t", err)
+		fmt.Println("Sorry! Please try again.")
+		os.Exit(1)
+	}
+	url.Path = path.Join(url.Path, "/1/team_slug")
+	req, err := http.NewRequest("GET", url.String(), nil)
 	req.Header.Set("User-Agent", libhoney.UserAgentAddition)
 	req.Header.Add("X-Honeycomb-Team", writeKey)
 	client := &http.Client{}
