@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -94,72 +95,79 @@ func (j *KeyValLineParser) ParseLine(line string) (map[string]interface{}, error
 }
 
 func (p *Parser) ProcessLines(lines <-chan string, send chan<- event.Event, prefixRegex *parsers.ExtRegexp) {
-	for line := range lines {
-		logrus.WithFields(logrus.Fields{
-			"line": line,
-		}).Debug("Attempting to process keyval log line")
-
-		// if matching regex is set, filter lines here
-		if p.filterRegex != nil {
-			matched := p.filterRegex.MatchString(line)
-			// if both are true or both are false, skip. else continue
-			if matched == p.conf.InvertFilter {
+	wg := sync.WaitGroup{}
+	wg.Add(5)
+	for i := 0; i < 5; i++ {
+		go func() {
+			for line := range lines {
 				logrus.WithFields(logrus.Fields{
-					"line":    line,
-					"matched": matched,
-				}).Debug("skipping line due to FilterMatch.")
-				continue
+					"line": line,
+				}).Debug("Attempting to process keyval log line")
+
+				// if matching regex is set, filter lines here
+				if p.filterRegex != nil {
+					matched := p.filterRegex.MatchString(line)
+					// if both are true or both are false, skip. else continue
+					if matched == p.conf.InvertFilter {
+						logrus.WithFields(logrus.Fields{
+							"line":    line,
+							"matched": matched,
+						}).Debug("skipping line due to FilterMatch.")
+						continue
+					}
+				}
+
+				// take care of any headers on the line
+				var prefixFields map[string]string
+				if prefixRegex != nil {
+					var prefix string
+					prefix, prefixFields = prefixRegex.FindStringSubmatchMap(line)
+					line = strings.TrimPrefix(line, prefix)
+				}
+
+				parsedLine, err := p.lineParser.ParseLine(line)
+				if err != nil {
+					// skip lines that won't parse
+					logrus.WithFields(logrus.Fields{
+						"line":  line,
+						"error": err,
+					}).Debug("skipping line; failed to parse.")
+					continue
+				}
+				if len(parsedLine) == 0 {
+					// skip empty lines, as determined by the parser
+					logrus.WithFields(logrus.Fields{
+						"line":  line,
+						"error": err,
+					}).Debug("skipping line; no key/val pairs found.")
+					continue
+				}
+				if allEmpty(parsedLine) {
+					// skip events for which all fields are the empty string, because that's
+					// probably broken
+					logrus.WithFields(logrus.Fields{
+						"line":  line,
+						"error": err,
+					}).Debug("skipping line; no all values are the empty string.")
+					continue
+				}
+				// merge the prefix fields and the parsed line contents
+				for k, v := range prefixFields {
+					parsedLine[k] = v
+				}
+
+				// look for the timestamp in any of the prefix fields or regular content
+				timestamp := p.getTimestamp(parsedLine)
+
+				// send an event to Transmission
+				e := event.Event{
+					Timestamp: timestamp,
+					Data:      parsedLine,
+				}
+				send <- e
 			}
-		}
-
-		// take care of any headers on the line
-		var prefixFields map[string]string
-		if prefixRegex != nil {
-			var prefix string
-			prefix, prefixFields = prefixRegex.FindStringSubmatchMap(line)
-			line = strings.TrimPrefix(line, prefix)
-		}
-
-		parsedLine, err := p.lineParser.ParseLine(line)
-		if err != nil {
-			// skip lines that won't parse
-			logrus.WithFields(logrus.Fields{
-				"line":  line,
-				"error": err,
-			}).Debug("skipping line; failed to parse.")
-			continue
-		}
-		if len(parsedLine) == 0 {
-			// skip empty lines, as determined by the parser
-			logrus.WithFields(logrus.Fields{
-				"line":  line,
-				"error": err,
-			}).Debug("skipping line; no key/val pairs found.")
-			continue
-		}
-		if allEmpty(parsedLine) {
-			// skip events for which all fields are the empty string, because that's
-			// probably broken
-			logrus.WithFields(logrus.Fields{
-				"line":  line,
-				"error": err,
-			}).Debug("skipping line; no all values are the empty string.")
-			continue
-		}
-		// merge the prefix fields and the parsed line contents
-		for k, v := range prefixFields {
-			parsedLine[k] = v
-		}
-
-		// look for the timestamp in any of the prefix fields or regular content
-		timestamp := p.getTimestamp(parsedLine)
-
-		// send an event to Transmission
-		e := event.Event{
-			Timestamp: timestamp,
-			Data:      parsedLine,
-		}
-		send <- e
+		}()
+		wg.Done()
 	}
 	logrus.Debug("lines channel is closed, ending keyval processor")
 }
