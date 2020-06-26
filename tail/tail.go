@@ -16,9 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/hpcloud/tail"
-	"golang.org/x/sys/unix"
+	"github.com/sirupsen/logrus"
 )
 
 type RotateStyle int
@@ -316,18 +315,18 @@ func getStartLocation(stateFile string, logfile string) *tail.SeekInfo {
 		return end
 	}
 	// get the details of the existing log file
-	logStat := unix.Stat_t{}
-	if err := unix.Stat(logfile, &logStat); err != nil {
+	uid, err := getFileUniqueID(logfile)
+	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"starting at": "end", "error": err,
-		}).Debug("getStartLocation failed to get unix.stat() on the logfile")
+		}).Debug("getStartLocation failed to get unique id for the logfile")
 		return end
 	}
-	// compare inode numbers of the last-seen and existing log files
-	if state.INode != uint64(logStat.Ino) {
+	// compare unique ids of the last-seen and existing log files
+	if state.INode != uint64(uid) {
 		logrus.WithFields(logrus.Fields{
 			"starting at": "beginning", "error": err,
-		}).Debug("getStartLocation found a different inode number for the logfile")
+		}).Debug("getStartLocation found a different unique id for the logfile")
 		// file's been rotated
 		return beginning
 	}
@@ -422,13 +421,11 @@ func getStateFile(conf Config, filename string, numFiles int) string {
 // updateStateFile updates the state file once per second with the current
 // values for the logfile's inode number and offset
 func updateStateFile(state *State, t *tail.Tail, file string, stateFh *os.File) {
-	logStat := unix.Stat_t{}
-	unix.Stat(file, &logStat)
 	currentPos, err := t.Tell()
 	if err != nil {
 		return
 	}
-	state.INode = uint64(logStat.Ino)
+	state.INode, _ = getFileUniqueID(file)
 	state.Offset = currentPos
 	out, err := json.Marshal(state)
 	if err != nil {
